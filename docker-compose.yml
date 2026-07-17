@@ -1,0 +1,152 @@
+x-app-environment: &app-environment
+  CDK_DATABASE_URL: "postgres://cdk:${CDK_POSTGRES_PASSWORD:?set CDK_POSTGRES_PASSWORD in .env}@postgres:5432/cdk?sslmode=disable"
+  CDK_REDIS_URL: redis://redis:6379
+  CDK_LOG_LEVEL: ${CDK_LOG_LEVEL:-info}
+
+x-app-runtime: &app-runtime
+  restart: unless-stopped
+  init: true
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cdk
+      POSTGRES_PASSWORD: ${CDK_POSTGRES_PASSWORD:?set CDK_POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: cdk
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cdk -d cdk -h 127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: cli
+    environment:
+      CDK_DATABASE_URL: "postgres://cdk:${CDK_POSTGRES_PASSWORD:?set CDK_POSTGRES_PASSWORD in .env}@postgres:5432/cdk?sslmode=disable"
+    command: ["/app/migrate", "up"]
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  admin-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: cli
+    environment:
+      <<: *app-environment
+      CDK_ADMIN_USERNAME: ${CDK_ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${CDK_ADMIN_PASSWORD:?set CDK_ADMIN_PASSWORD in .env}
+      PGCONNECT_TIMEOUT: "5"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ "$$(psql "$$CDK_DATABASE_URL" -tAc 'SELECT EXISTS (SELECT 1 FROM admins)')" = "t" ]; then
+          echo "admin already exists; skipping bootstrap"
+        else
+          exec /app/admin-create "$$CDK_ADMIN_USERNAME"
+        fi
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  api:
+    <<: *app-runtime
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    environment:
+      <<: *app-environment
+      CDK_HOST: 0.0.0.0
+      CDK_PORT: 8080
+      CDK_TRUSTED_PROXIES: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+      CDK_SESSION_COOKIE_SECURE: ${CDK_SESSION_COOKIE_SECURE:-true}
+      CDK_SESSION_COOKIE_SAMESITE: ${CDK_SESSION_COOKIE_SAMESITE:-strict}
+      CDK_RATE_LIMIT_REQUESTS: ${CDK_RATE_LIMIT_REQUESTS:-10}
+      CDK_RATE_LIMIT_WINDOW: ${CDK_RATE_LIMIT_WINDOW:-1m}
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      admin-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    <<: *app-runtime
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    environment:
+      <<: *app-environment
+    depends_on:
+      admin-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      CDK_SITE_ADDRESS: ${CDK_SITE_ADDRESS:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_started
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:

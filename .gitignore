@@ -1,0 +1,105 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+/cdk-system
+/bin/
+/api
+/worker
+/migrate
+/admin-create
+
+# Go
+vendor/
+*.test
+*.out
+coverage.html
+coverage.out
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+.postgres/
+
+# Logs
+*.log
+
+# IDE
+.idea/
+.vscode/
+.agents/
+.codex/
+*.swp
+*.swo
+*~
+*.bak
+*.backup
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python (legacy)
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+ENV/
+
+# Pre-Go local prototype retained only as migration reference
+/app.py
+/cdk.py
+/config.py
+/converter.py
+/db.py
+/ratelimit.py
+/webhook.py
+/webhook_capture.py
+/e2e_test.py
+/e2e_webhook.py
+/routes/
+/requirements.txt
+/schema.sql
+
+# Local review and conversion fixtures
+/GO_QUICK_REAUDIT_ZH.md
+/GO_REFACTOR_IMPROVEMENT_PLAN_ZH.md
+/PROJECT_AUDIT_ZH.md
+/package-lock.json
+/req_*.json
+/sample_*.json
+
+# Frontend (web/ has its own .gitignore)
+web/node_modules/
+web/dist/
+!web/dist/.gitkeep
+
+# Build artifacts
+dist/
+build/
+/out*
+/backups/
+*.dump
+*.dump.gz
+*.sql.gz
+
+# Test artifacts
+tmp/
+temp/
+.gocache-audit/

@@ -1,0 +1,25 @@
+# Defaults to Caddy's locally trusted localhost certificate. Set
+# CDK_SITE_ADDRESS to the production domain before a public deployment.
+{$CDK_SITE_ADDRESS:localhost} {
+	# Compression
+	encode gzip zstd
+
+	# Security headers
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	# Operational endpoints remain reachable through the loopback-bound API port.
+	@internal path /metrics /readyz
+	respond @internal 404
+
+	# Reverse proxy to Go API
+	reverse_proxy api:8080 {
+		# Strip untrusted X-Forwarded-For and set the real client IP.
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+	}
+}
