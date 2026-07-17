@@ -201,23 +201,28 @@ Webhook 使用 `X-CDK-Signature: sha256=<HMAC-SHA256>` 签名。接收端应验�
 
 | 页面 | 文件 |
 |---|---|
-| 用户兑换页 | `docs/screenshots/redeem-page.png` |
+| 用户兑换页（亮色） | `docs/screenshots/redeem-page.png` |
+| 用户兑换页（暗色） | `docs/screenshots/redeem-dark.png` |
+| 管理仪表盘 | `docs/screenshots/admin-dashboard.png` |
 | 批次管理 | `docs/screenshots/admin-batches.png` |
-| 站点设置 | `docs/screenshots/site-settings.png` |
 
-### 用户兑换页
+### 用户兑换页（亮色）
 
-![用户兑换页](docs/screenshots/redeem-page.png)
+![用户兑换页亮色模式](docs/screenshots/redeem-page.png)
+
+### 用户兑换页（暗色）
+
+![用户兑换页暗色模式](docs/screenshots/redeem-dark.png)
+
+### 管理仪表盘
+
+![管理仪表盘](docs/screenshots/admin-dashboard.png)
 
 ### 批次管理
 
 ![批次管理](docs/screenshots/admin-batches.png)
 
-### 站点设置
-
-![站点设置](docs/screenshots/site-settings.png)
-
-更新截图前请确认其中没有真实邮箱、兑换码、凭证、Webhook 地址或管理员信息。
+更新截图前请使用演示数据，避免展示真实邮箱、兑换码、凭证、Webhook 地址或管理员信息。
 
 ## 发布前检查
 
