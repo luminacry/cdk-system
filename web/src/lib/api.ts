@@ -11,6 +11,7 @@ import type {
   Paged,
   RecentItem,
   RedeemSuccess,
+  RedeemBatchResponse,
   Stats,
 } from "./types"
 
@@ -121,6 +122,11 @@ export const api = {
     request<RedeemSuccess>("/api/redeem", {
       method: "POST",
       body: JSON.stringify({ user_id, code }),
+    }),
+  redeemBatch: (user_id: string, codes: string[]) =>
+    request<RedeemBatchResponse>("/api/redeem/batch", {
+      method: "POST",
+      body: JSON.stringify({ user_id, codes }),
     }),
 
   // 兑换须知（公开只读 + 管理）

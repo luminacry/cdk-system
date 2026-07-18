@@ -66,11 +66,29 @@ func TestRedeemRejectsInvalidInputBeforeDatabaseAccess(t *testing.T) {
 		{UserID: "   ", Code: "ABCD1234"},
 		{UserID: "user@example.com", Code: strings.Repeat("A", MaxCodeLength+1)},
 		{UserID: "user@example.com", Code: "ABCD1234", IdempotencyKey: strings.Repeat("k", MaxIdempotencyKeyLength+1)},
+		{UserID: "user@example.com", Code: "ABCD1234", IdempotencyKey: " key-with-space "},
 	}
 	for _, req := range tests {
 		resp, err := service.Redeem(context.Background(), req)
 		if err != nil || resp == nil || resp.Result != ResultInvalidInput {
 			t.Fatalf("Redeem(%+v) = %+v, %v; want invalid_input", req, resp, err)
+		}
+	}
+}
+
+func TestBatchRedeemRejectsInvalidInputBeforeDatabaseAccess(t *testing.T) {
+	service := NewService(nil, nil)
+	tests := []BatchRedeemRequest{
+		{UserID: "", Codes: []string{"ABCD1234"}},
+		{UserID: "user@example.com"},
+		{UserID: "user@example.com", Codes: make([]string, MaxBatchCodes+1)},
+		{UserID: "user@example.com", Codes: []string{"ABCD1234"}, IdempotencyKey: strings.Repeat("k", MaxIdempotencyKeyLength+1)},
+		{UserID: "user@example.com", Codes: []string{"ABCD1234"}, IdempotencyKey: " key-with-space "},
+	}
+	for _, req := range tests {
+		resp, err := service.BatchRedeem(context.Background(), req)
+		if err != nil || resp == nil || resp.OK {
+			t.Fatalf("BatchRedeem(%+v) = %+v, %v; want validation failure", req, resp, err)
 		}
 	}
 }

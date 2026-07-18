@@ -262,17 +262,6 @@ export function BatchNewPage() {
                   />
                   <p className="text-xs text-muted-foreground">通常为 1（一码一兑）</p>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="max-per-user">每邮箱限兑次数</Label>
-                  <Input
-                    id="max-per-user"
-                    type="number"
-                    min={1}
-                    value={form.max_redeems_per_user}
-                    onChange={(e) => set("max_redeems_per_user", Number(e.target.value))}
-                  />
-                  <p className="text-xs text-muted-foreground">同一邮箱在本批次的限次</p>
-                </div>
               </CardContent>
             </Card>
 

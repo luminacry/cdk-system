@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,6 +17,8 @@ type RedeemHandler struct {
 	service   *redeem.Service
 	rateLimit *ratelimit.Limiter
 }
+
+const batchRedeemRateLimit = 60
 
 // NewRedeemHandler creates a new RedeemHandler.
 func NewRedeemHandler(service *redeem.Service, rateLimit *ratelimit.Limiter) *RedeemHandler {
@@ -33,6 +36,10 @@ func (h *RedeemHandler) Redeem(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
 		RespondError(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
@@ -83,4 +90,76 @@ func (h *RedeemHandler) Redeem(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	RespondJSON(w, status, resp)
+}
+
+// BatchRedeem handles POST /api/redeem/batch.
+func (h *RedeemHandler) BatchRedeem(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	r.Body = io.NopCloser(redeem.LimitJSONBody(r))
+
+	var req redeem.BatchRedeemRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		RespondError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if len(req.Codes) == 0 || len(req.Codes) > redeem.MaxBatchCodes {
+		RespondError(w, http.StatusBadRequest, "每次请输入 1-20 个兑换码")
+		return
+	}
+
+	req.IP = r.RemoteAddr
+	req.IdempotencyKey = r.Header.Get("Idempotency-Key")
+	ip := r.RemoteAddr
+	if ip == "" {
+		ip = "unknown"
+	}
+	if !h.allowBatchRedeemN(ctx, "redeem:batch:ip:"+ip, len(req.Codes)) {
+		RespondError(w, http.StatusTooManyRequests, "请求过于频繁，请稍后再试")
+		return
+	}
+	if req.UserID != "" && !h.allowBatchRedeemN(ctx, "redeem:batch:user:"+redeem.NormalizeUserKey(req.UserID), len(req.Codes)) {
+		RespondError(w, http.StatusTooManyRequests, "请求过于频繁，请稍后再试")
+		return
+	}
+
+	resp, err := h.service.BatchRedeem(ctx, req)
+	if err != nil {
+		if errors.Is(err, redeem.ErrIdempotencyConflict) {
+			RespondError(w, http.StatusConflict, "幂等 key 与请求不匹配")
+			return
+		}
+		observability.Logger(ctx).Error("batch redeem failed", "error", err)
+		RespondError(w, http.StatusInternalServerError, "批量兑换处理失败")
+		return
+	}
+	if !resp.OK {
+		RespondJSON(w, http.StatusBadRequest, resp)
+		return
+	}
+	RespondJSON(w, http.StatusOK, resp)
+}
+
+func ensureJSONEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func (h *RedeemHandler) allowBatchRedeemN(ctx context.Context, key string, count int) bool {
+	allowed, err := h.rateLimit.AllowNWithLimit(ctx, key, count, batchRedeemRateLimit)
+	if err != nil {
+		observability.Logger(ctx).Error("rate limit check failed", "error", err)
+	}
+	return allowed
 }

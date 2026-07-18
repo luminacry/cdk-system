@@ -1701,25 +1701,3 @@ func (q *Queries) UpdateWebhookOutboxSuccess(ctx context.Context, arg UpdateWebh
 	}
 	return result.RowsAffected(), nil
 }
-
-const upsertUserBatchUsage = `-- name: UpsertUserBatchUsage :one
-INSERT INTO user_batch_usage (batch_id, user_key, used_count)
-VALUES ($1, $2, 1)
-ON CONFLICT (batch_id, user_key)
-DO UPDATE SET used_count = user_batch_usage.used_count + 1
-WHERE user_batch_usage.used_count < $3
-RETURNING used_count
-`
-
-type UpsertUserBatchUsageParams struct {
-	BatchID   int64  `json:"batch_id"`
-	UserKey   string `json:"user_key"`
-	UsedCount int32  `json:"used_count"`
-}
-
-func (q *Queries) UpsertUserBatchUsage(ctx context.Context, arg UpsertUserBatchUsageParams) (int32, error) {
-	row := q.db.QueryRow(ctx, upsertUserBatchUsage, arg.BatchID, arg.UserKey, arg.UsedCount)
-	var used_count int32
-	err := row.Scan(&used_count)
-	return used_count, err
-}

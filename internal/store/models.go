@@ -286,14 +286,6 @@ type SiteSetting struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
-type UserBatchUsage struct {
-	BatchID   int64     `json:"batch_id"`
-	UserKey   string    `json:"user_key"`
-	UsedCount int32     `json:"used_count"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-}
-
 type WebhookOutbox struct {
 	ID             int64              `json:"id"`
 	EventID        string             `json:"event_id"`

@@ -28,6 +28,7 @@ const (
 	MaxUserIDLength         = 256
 	MaxIdempotencyKeyLength = 128
 	MaxPayloadSize          = 64 * 1024
+	MaxBatchCodes           = 20
 )
 
 // ErrIdempotencyConflict is returned when an idempotency key is reused with a different request.
@@ -80,6 +81,127 @@ type RedeemResponse struct {
 	WebhookPending bool            `json:"-"`
 }
 
+// BatchRedeemRequest is the input for redeeming several codes for one user.
+type BatchRedeemRequest struct {
+	UserID         string   `json:"user_id"`
+	Codes          []string `json:"codes"`
+	IdempotencyKey string   `json:"-"`
+	IP             string   `json:"-"`
+}
+
+// BatchRedeemItem keeps each result associated with its submitted position.
+type BatchRedeemItem struct {
+	Code       string          `json:"code"`
+	OK         bool            `json:"ok"`
+	Result     string          `json:"result"`
+	Message    string          `json:"message"`
+	Redemption *RedeemResponse `json:"redemption,omitempty"`
+}
+
+// BatchRedeemResponse summarizes a completed batch request.
+type BatchRedeemResponse struct {
+	OK        bool              `json:"ok"`
+	Message   string            `json:"message,omitempty"`
+	Total     int               `json:"total"`
+	Succeeded int               `json:"succeeded"`
+	Failed    int               `json:"failed"`
+	Results   []BatchRedeemItem `json:"results,omitempty"`
+}
+
+// BatchRedeem redeems codes in order. Each code uses its own transaction, so
+// normal business failures do not roll back or stop the remaining items.
+func (s *Service) BatchRedeem(ctx context.Context, req BatchRedeemRequest) (*BatchRedeemResponse, error) {
+	req.UserID = strings.TrimSpace(req.UserID)
+	if req.UserID == "" {
+		return batchFailure("请输入邮箱"), nil
+	}
+	if utf8.RuneCountInString(req.UserID) > MaxUserIDLength {
+		return batchFailure("邮箱过长"), nil
+	}
+	if len(req.Codes) == 0 || len(req.Codes) > MaxBatchCodes {
+		return batchFailure(fmt.Sprintf("每次请输入 1-%d 个兑换码", MaxBatchCodes)), nil
+	}
+	if !validIdempotencyKey(req.IdempotencyKey) {
+		return batchFailure("幂等 key 无效或过长"), nil
+	}
+
+	var idempotencyTx pgx.Tx
+	var idempotencyQueries *store.Queries
+	if req.IdempotencyKey != "" {
+		var err error
+		idempotencyTx, err = s.pool.Begin(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("begin batch idempotency transaction: %w", err)
+		}
+		defer idempotencyTx.Rollback(ctx)
+		idempotencyQueries = s.queries.WithTx(idempotencyTx)
+		stored, err := s.handleBatchIdempotency(ctx, idempotencyQueries, req)
+		if err != nil {
+			return nil, err
+		}
+		if stored != nil {
+			return stored, nil
+		}
+	}
+
+	resp := &BatchRedeemResponse{
+		OK:      true,
+		Message: "批量兑换处理完成",
+		Total:   len(req.Codes),
+		Results: make([]BatchRedeemItem, 0, len(req.Codes)),
+	}
+	seen := make(map[string]struct{}, len(req.Codes))
+	for _, inputCode := range req.Codes {
+		normalizedCode := NormalizeCode(inputCode)
+		item := BatchRedeemItem{Code: strings.TrimSpace(inputCode)}
+		if normalizedCode == "" {
+			item.Result = ResultInvalidInput
+			item.Message = "兑换码不能为空"
+		} else if len(normalizedCode) > MaxCodeLength {
+			item.Result = ResultInvalidInput
+			item.Message = "兑换码过长"
+		} else if _, duplicate := seen[normalizedCode]; duplicate {
+			item.Result = ResultInvalidInput
+			item.Message = "兑换码重复，已跳过"
+		} else {
+			seen[normalizedCode] = struct{}{}
+			itemResponse, err := s.Redeem(ctx, RedeemRequest{
+				UserID: req.UserID,
+				Code:   inputCode,
+				IP:     req.IP,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("redeem batch code %q: %w", normalizedCode, err)
+			}
+			item.OK = itemResponse.OK
+			item.Result = itemResponse.Result
+			item.Message = itemResponse.Message
+			if itemResponse.OK {
+				item.Code = itemResponse.Code
+				item.Redemption = itemResponse
+			}
+		}
+
+		if item.OK {
+			resp.Succeeded++
+		} else {
+			resp.Failed++
+		}
+		resp.Results = append(resp.Results, item)
+	}
+
+	if req.IdempotencyKey != "" {
+		if err := s.storeBatchIdempotencyResponse(ctx, idempotencyQueries, req.IdempotencyKey, resp); err != nil {
+			return nil, err
+		}
+		if err := idempotencyTx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit batch idempotency transaction: %w", err)
+		}
+		idempotencyTx = nil
+	}
+	return resp, nil
+}
+
 // Redeem attempts to redeem a code atomically.
 func (s *Service) Redeem(ctx context.Context, req RedeemRequest) (*RedeemResponse, error) {
 	req.UserID = strings.TrimSpace(req.UserID)
@@ -94,7 +216,7 @@ func (s *Service) Redeem(ctx context.Context, req RedeemRequest) (*RedeemRespons
 	if len(code) > MaxCodeLength {
 		return failure(ResultInvalidInput, "兑换码过长"), nil
 	}
-	if req.IdempotencyKey != "" && (len(req.IdempotencyKey) > MaxIdempotencyKeyLength || strings.TrimSpace(req.IdempotencyKey) == "") {
+	if !validIdempotencyKey(req.IdempotencyKey) {
 		return failure(ResultInvalidInput, "幂等 key 无效或过长"), nil
 	}
 
@@ -158,35 +280,6 @@ func (s *Service) Redeem(ctx context.Context, req RedeemRequest) (*RedeemRespons
 			return nil, fmt.Errorf("get unused credential: %w", err)
 		}
 		credential = &cred
-	}
-
-	newUsedCount, err := qtx.UpsertUserBatchUsage(ctx, store.UpsertUserBatchUsageParams{
-		BatchID:   codeRow.BatchID,
-		UserKey:   userKey,
-		UsedCount: codeRow.MaxRedeemsPerUser,
-	})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			resp := failure(ResultUserLimit, "您在该活动中的兑换次数已达上限")
-			if err := s.recordFailure(ctx, qtx, req, code, userKey, &codeRow.ID, &codeRow.BatchID, resp); err != nil {
-				return nil, err
-			}
-			if err := tx.Commit(ctx); err != nil {
-				return nil, err
-			}
-			return resp, nil
-		}
-		return nil, fmt.Errorf("upsert user usage: %w", err)
-	}
-	if newUsedCount > codeRow.MaxRedeemsPerUser {
-		resp := failure(ResultUserLimit, "您在该活动中的兑换次数已达上限")
-		if err := s.recordFailure(ctx, qtx, req, code, userKey, &codeRow.ID, &codeRow.BatchID, resp); err != nil {
-			return nil, err
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return nil, err
-		}
-		return resp, nil
 	}
 
 	_, err = qtx.IncrementCodeUseCount(ctx, store.IncrementCodeUseCountParams{
@@ -373,8 +466,52 @@ func (s *Service) storeIdempotencyResponse(ctx context.Context, qtx *store.Queri
 	})
 }
 
+func (s *Service) handleBatchIdempotency(ctx context.Context, qtx *store.Queries, req BatchRedeemRequest) (*BatchRedeemResponse, error) {
+	requestHash := hashBatchRequest(req)
+	_, err := qtx.CreateIdempotencyKey(ctx, store.CreateIdempotencyKeyParams{
+		Key:         req.IdempotencyKey,
+		RequestHash: requestHash,
+	})
+	if err == nil {
+		return nil, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("create batch idempotency key: %w", err)
+	}
+	existing, err := qtx.LockIdempotencyKeyByKey(ctx, req.IdempotencyKey)
+	if err != nil {
+		return nil, fmt.Errorf("lock batch idempotency key: %w", err)
+	}
+	if !equalHash(existing.RequestHash, requestHash) {
+		return nil, ErrIdempotencyConflict
+	}
+	if len(existing.ResponseBody) == 0 {
+		return nil, nil
+	}
+	var resp BatchRedeemResponse
+	if err := json.Unmarshal(existing.ResponseBody, &resp); err != nil {
+		return nil, fmt.Errorf("unmarshal batch idempotency response: %w", err)
+	}
+	return &resp, nil
+}
+
+func (s *Service) storeBatchIdempotencyResponse(ctx context.Context, qtx *store.Queries, key string, resp *BatchRedeemResponse) error {
+	body, err := json.Marshal(resp)
+	if err != nil {
+		return fmt.Errorf("marshal batch idempotency response: %w", err)
+	}
+	if err := qtx.SetIdempotencyResponse(ctx, store.SetIdempotencyResponseParams{Key: key, ResponseBody: body}); err != nil {
+		return fmt.Errorf("store batch idempotency response: %w", err)
+	}
+	return nil
+}
+
 func failure(result, message string) *RedeemResponse {
 	return &RedeemResponse{OK: false, Result: result, Message: message}
+}
+
+func batchFailure(message string) *BatchRedeemResponse {
+	return &BatchRedeemResponse{OK: false, Message: message}
 }
 
 func webhookStatus(pending bool) store.WebhookStatus {
@@ -390,6 +527,24 @@ func hashRequest(req RedeemRequest) []byte {
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(NormalizeCode(req.Code)))
 	return h.Sum(nil)
+}
+
+func hashBatchRequest(req BatchRedeemRequest) []byte {
+	h := sha256.New()
+	_, _ = h.Write([]byte("batch\x00"))
+	_, _ = h.Write([]byte(req.UserID))
+	for _, code := range req.Codes {
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(NormalizeCode(code)))
+	}
+	return h.Sum(nil)
+}
+
+func validIdempotencyKey(key string) bool {
+	if key == "" {
+		return true
+	}
+	return len(key) <= MaxIdempotencyKeyLength && key == strings.TrimSpace(key)
 }
 
 func stringPtr(s string) *string {

@@ -146,14 +146,6 @@ WHERE id = $1
   AND use_count < $2
 RETURNING id, use_count;
 
--- name: UpsertUserBatchUsage :one
-INSERT INTO user_batch_usage (batch_id, user_key, used_count)
-VALUES ($1, $2, 1)
-ON CONFLICT (batch_id, user_key)
-DO UPDATE SET used_count = user_batch_usage.used_count + 1
-WHERE user_batch_usage.used_count < $3
-RETURNING used_count;
-
 -- name: CreateIdempotencyKey :one
 INSERT INTO idempotency_keys (key, request_hash)
 VALUES ($1, $2)

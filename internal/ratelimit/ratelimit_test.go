@@ -21,8 +21,8 @@ func TestAllowExecutesSingleAtomicScript(t *testing.T) {
 			if len(keys) != 1 || keys[0] != "ratelimit:login:127.0.0.1" {
 				t.Fatalf("keys = %v", keys)
 			}
-			if len(args) != 5 {
-				t.Fatalf("args length = %d, want 5", len(args))
+			if len(args) != 6 {
+				t.Fatalf("args length = %d, want 6", len(args))
 			}
 			now, err := strconv.ParseInt(args[0], 10, 64)
 			if err != nil {
@@ -35,7 +35,7 @@ func TestAllowExecutesSingleAtomicScript(t *testing.T) {
 			if now-start != time.Minute.Milliseconds() {
 				t.Fatalf("window = %dms, want %dms", now-start, time.Minute.Milliseconds())
 			}
-			if args[2] != "3" || args[3] != "60000" || !strings.HasPrefix(args[4], args[0]+":") {
+			if args[2] != "3" || args[3] != "60000" || args[4] != "1" || !strings.HasPrefix(args[5], args[0]+":") {
 				t.Fatalf("unexpected script args: %v", args)
 			}
 			return 1, nil
@@ -48,6 +48,45 @@ func TestAllowExecutesSingleAtomicScript(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("script calls = %d, want 1", calls)
+	}
+}
+
+func TestAllowNChargesRequestedCountAtomically(t *testing.T) {
+	limiter := &Limiter{
+		window:  time.Minute,
+		maxReqs: 20,
+		eval: func(_ context.Context, _ rueidis.Client, _ []string, args []string) (int64, error) {
+			if len(args) != 9 || args[4] != "4" {
+				t.Fatalf("args = %v; want count plus four members", args)
+			}
+			for _, member := range args[5:] {
+				if !strings.HasPrefix(member, args[0]+":") {
+					t.Fatalf("member %q does not include timestamp", member)
+				}
+			}
+			return 1, nil
+		},
+	}
+	allowed, err := limiter.AllowN(context.Background(), "redeem:user:test", 4)
+	if err != nil || !allowed {
+		t.Fatalf("AllowN() = %v, %v; want true, nil", allowed, err)
+	}
+}
+
+func TestAllowNWithLimitUsesRouteSpecificCeiling(t *testing.T) {
+	limiter := &Limiter{
+		window:  time.Minute,
+		maxReqs: 10,
+		eval: func(_ context.Context, _ rueidis.Client, _ []string, args []string) (int64, error) {
+			if args[2] != "60" || args[4] != "20" || len(args) != 25 {
+				t.Fatalf("args = %v; want ceiling 60 and count 20", args)
+			}
+			return 1, nil
+		},
+	}
+	allowed, err := limiter.AllowNWithLimit(context.Background(), "redeem:batch:user:test", 20, 60)
+	if err != nil || !allowed {
+		t.Fatalf("AllowNWithLimit() = %v, %v; want true, nil", allowed, err)
 	}
 }
 
@@ -79,5 +118,13 @@ func TestAllowRejectsNonPositiveWindow(t *testing.T) {
 	allowed, err := limiter.Allow(context.Background(), "key")
 	if allowed || err == nil {
 		t.Fatalf("Allow() = %v, %v; want false and validation error", allowed, err)
+	}
+}
+
+func TestAllowNRejectsNonPositiveCount(t *testing.T) {
+	limiter := &Limiter{window: time.Minute, maxReqs: 10}
+	allowed, err := limiter.AllowN(context.Background(), "key", 0)
+	if allowed || err == nil {
+		t.Fatalf("AllowN() = %v, %v; want false and validation error", allowed, err)
 	}
 }

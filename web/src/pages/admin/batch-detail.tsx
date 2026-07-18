@@ -225,9 +225,6 @@ export function BatchDetailPage() {
             <InfoItem label="单码次数">
               <span className="font-mono">{batch.max_uses_per_code}</span>
             </InfoItem>
-            <InfoItem label="每邮箱限兑">
-              <span className="font-mono">{batch.max_redeems_per_user}</span>
-            </InfoItem>
             <InfoItem label="凭证分配">
               <span>{batch.assign_credential ? batch.credential_plan_type : "未启用"}</span>
             </InfoItem>

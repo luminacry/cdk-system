@@ -88,6 +88,15 @@ func (f *integrationFixture) idempotencyKey(suffix string) string {
 	return key
 }
 
+func (f *integrationFixture) addCode(t *testing.T, suffix string) string {
+	t.Helper()
+	code := f.code + suffix
+	if _, err := f.pool.Exec(context.Background(), `INSERT INTO codes (batch_id, code) VALUES ($1, $2)`, f.batchID, code); err != nil {
+		t.Fatalf("insert integration code: %v", err)
+	}
+	return code
+}
+
 func TestRedeemCredentialInventoryIntegration(t *testing.T) {
 	fixture := newIntegrationFixture(t, true, 1, 1)
 	ctx := context.Background()
@@ -103,7 +112,7 @@ func TestRedeemCredentialInventoryIntegration(t *testing.T) {
 	if first.Result != ResultCredentialUnavailable {
 		t.Fatalf("result = %q, want %q", first.Result, ResultCredentialUnavailable)
 	}
-	assertUsage(t, fixture, 0, 0)
+	assertCodeUsage(t, fixture, 0)
 
 	expiredAt := time.Now().UTC().Add(-time.Hour)
 	if _, err := fixture.pool.Exec(ctx, `
@@ -128,7 +137,7 @@ func TestRedeemCredentialInventoryIntegration(t *testing.T) {
 	if second.Result != ResultCredentialUnavailable {
 		t.Fatalf("result = %q, want %q", second.Result, ResultCredentialUnavailable)
 	}
-	assertUsage(t, fixture, 0, 0)
+	assertCodeUsage(t, fixture, 0)
 
 	var credentialID int64
 	if err := fixture.pool.QueryRow(ctx, `
@@ -155,7 +164,7 @@ func TestRedeemCredentialInventoryIntegration(t *testing.T) {
 	if credential["marker"] != "valid" {
 		t.Fatalf("assigned credential marker = %v, want valid", credential["marker"])
 	}
-	assertUsage(t, fixture, 1, 1)
+	assertCodeUsage(t, fixture, 1)
 
 	var used bool
 	if err := fixture.pool.QueryRow(ctx, `SELECT used FROM credentials WHERE id = $1`, credentialID).Scan(&used); err != nil {
@@ -192,7 +201,7 @@ func TestRedeemConcurrentIdempotencyIntegration(t *testing.T) {
 	if failures.Load() != 0 {
 		t.Fatalf("%d concurrent idempotent requests failed", failures.Load())
 	}
-	assertUsage(t, fixture, 1, 1)
+	assertCodeUsage(t, fixture, 1)
 
 	var successCount int
 	if err := fixture.pool.QueryRow(ctx, `
@@ -211,10 +220,117 @@ func TestRedeemConcurrentIdempotencyIntegration(t *testing.T) {
 	if !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("different request error = %v, want ErrIdempotencyConflict", err)
 	}
-	assertUsage(t, fixture, 1, 1)
+	assertCodeUsage(t, fixture, 1)
 }
 
-func TestRedeemUsedCodeDoesNotConsumeUserQuotaIntegration(t *testing.T) {
+func TestBatchRedeemPartialResultsIntegration(t *testing.T) {
+	fixture := newIntegrationFixture(t, false, 1, 2)
+	ctx := context.Background()
+	secondCode := fixture.addCode(t, "B")
+	thirdCode := fixture.addCode(t, "C")
+
+	resp, err := fixture.service.BatchRedeem(ctx, BatchRedeemRequest{
+		UserID: "batch-user@example.com",
+		Codes:  []string{fixture.code, "missing-code", secondCode, thirdCode, secondCode},
+	})
+	if err != nil {
+		t.Fatalf("batch redeem: %v", err)
+	}
+	if !resp.OK || resp.Total != 5 || resp.Succeeded != 3 || resp.Failed != 2 {
+		t.Fatalf("unexpected batch response: %+v", resp)
+	}
+	wantResults := []string{ResultSuccess, ResultInvalidCode, ResultSuccess, ResultSuccess, ResultInvalidInput}
+	for i, want := range wantResults {
+		if resp.Results[i].Result != want {
+			t.Fatalf("result[%d] = %q, want %q", i, resp.Results[i].Result, want)
+		}
+	}
+	if resp.Results[0].Redemption == nil || resp.Results[1].Redemption != nil {
+		t.Fatalf("success/failure redemption details are incorrect: %+v", resp.Results)
+	}
+	var thirdUses int
+	if err := fixture.pool.QueryRow(ctx, `SELECT use_count FROM codes WHERE code = $1`, thirdCode).Scan(&thirdUses); err != nil {
+		t.Fatal(err)
+	}
+	if thirdUses != 1 {
+		t.Fatalf("third code use_count = %d, want 1", thirdUses)
+	}
+}
+
+func TestBatchRedeemIdempotencyIntegration(t *testing.T) {
+	fixture := newIntegrationFixture(t, false, 2, 2)
+	ctx := context.Background()
+	secondCode := fixture.addCode(t, "B")
+	key := fixture.idempotencyKey("batch")
+	req := BatchRedeemRequest{
+		UserID:         "batch-idempotent@example.com",
+		Codes:          []string{fixture.code, secondCode},
+		IdempotencyKey: key,
+	}
+
+	first, err := fixture.service.BatchRedeem(ctx, req)
+	if err != nil || first.Succeeded != 2 {
+		t.Fatalf("first batch redeem = %+v, %v", first, err)
+	}
+	second, err := fixture.service.BatchRedeem(ctx, req)
+	if err != nil || second.Succeeded != 2 {
+		t.Fatalf("replayed batch redeem = %+v, %v", second, err)
+	}
+	var totalUses int
+	if err := fixture.pool.QueryRow(ctx, `SELECT SUM(use_count) FROM codes WHERE batch_id = $1`, fixture.batchID).Scan(&totalUses); err != nil {
+		t.Fatal(err)
+	}
+	if totalUses != 2 {
+		t.Fatalf("total uses after replay = %d, want 2", totalUses)
+	}
+
+	req.Codes = []string{fixture.code}
+	if _, err := fixture.service.BatchRedeem(ctx, req); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed batch request error = %v, want ErrIdempotencyConflict", err)
+	}
+}
+
+func TestBatchRedeemConcurrentIdempotencyIntegration(t *testing.T) {
+	fixture := newIntegrationFixture(t, false, 2, 2)
+	ctx := context.Background()
+	secondCode := fixture.addCode(t, "B")
+	req := BatchRedeemRequest{
+		UserID:         "batch-concurrent@example.com",
+		Codes:          []string{fixture.code, secondCode},
+		IdempotencyKey: fixture.idempotencyKey("batch-concurrent"),
+	}
+
+	const workers = 8
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var failures atomic.Int32
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			resp, err := fixture.service.BatchRedeem(ctx, req)
+			if err != nil || resp == nil || resp.Succeeded != 2 || resp.Failed != 0 {
+				failures.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if failures.Load() != 0 {
+		t.Fatalf("%d concurrent idempotent batch requests failed", failures.Load())
+	}
+	var totalUses int
+	if err := fixture.pool.QueryRow(ctx, `SELECT SUM(use_count) FROM codes WHERE batch_id = $1`, fixture.batchID).Scan(&totalUses); err != nil {
+		t.Fatal(err)
+	}
+	if totalUses != 2 {
+		t.Fatalf("total uses after concurrent replay = %d, want 2", totalUses)
+	}
+}
+
+func TestRedeemUsedCodeDoesNotIncrementCodeIntegration(t *testing.T) {
 	fixture := newIntegrationFixture(t, false, 1, 1)
 	ctx := context.Background()
 	if _, err := fixture.pool.Exec(ctx, `UPDATE codes SET use_count = 1 WHERE batch_id = $1`, fixture.batchID); err != nil {
@@ -228,7 +344,7 @@ func TestRedeemUsedCodeDoesNotConsumeUserQuotaIntegration(t *testing.T) {
 	if resp.Result != ResultCodeUsedUp {
 		t.Fatalf("result = %q, want %q", resp.Result, ResultCodeUsedUp)
 	}
-	assertUsage(t, fixture, 1, 0)
+	assertCodeUsage(t, fixture, 1)
 }
 
 func TestWebhookStatusUsesCurrentEventIntegration(t *testing.T) {
@@ -303,7 +419,7 @@ func TestWebhookStatusUsesCurrentEventIntegration(t *testing.T) {
 	}
 }
 
-func assertUsage(t *testing.T, fixture *integrationFixture, wantCode, wantUser int) {
+func assertCodeUsage(t *testing.T, fixture *integrationFixture, wantCode int) {
 	t.Helper()
 	ctx := context.Background()
 	var codeUses int
@@ -312,15 +428,5 @@ func assertUsage(t *testing.T, fixture *integrationFixture, wantCode, wantUser i
 	}
 	if codeUses != wantCode {
 		t.Fatalf("code use_count = %d, want %d", codeUses, wantCode)
-	}
-
-	var userUses int
-	err := fixture.pool.QueryRow(ctx, `
-		SELECT COALESCE(MAX(used_count), 0) FROM user_batch_usage WHERE batch_id = $1`, fixture.batchID).Scan(&userUses)
-	if err != nil {
-		t.Fatalf("read user usage: %v", err)
-	}
-	if userUses != wantUser {
-		t.Fatalf("user used_count = %d, want %d", userUses, wantUser)
 	}
 }

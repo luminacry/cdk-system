@@ -116,6 +116,7 @@ func main() {
 		r.Get("/site-settings", siteSettingsHandler.Get)
 		r.Get("/site-logo", siteSettingsHandler.Logo)
 		r.Post("/redeem", redeemHandler.Redeem)
+		r.Post("/redeem/batch", redeemHandler.BatchRedeem)
 
 		r.Route("/admin", func(r chi.Router) {
 			r.Post("/login", authHandler.Login)

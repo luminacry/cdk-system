@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import {
   CircleCheck,
+  CircleMinus,
   CircleX,
   ClipboardPaste,
   Copy,
@@ -22,7 +23,7 @@ import {
   detectAndParse,
   type ConvertSummary,
 } from "@/lib/converter"
-import type { RedeemSuccess } from "@/lib/types"
+import type { RedeemBatchItem, RedeemSuccess } from "@/lib/types"
 import { SiteLogo } from "@/components/site-settings-provider"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { ConfirmDialog } from "@/components/confirm-dialog"
@@ -65,12 +66,22 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { useSiteSettings } from "@/lib/site-settings-context"
 
-/** 兑换码输入格式化：大写 + 每 4 位加横杠 */
-function formatCdk(value: string): string {
-  return value
-    .replace(/[^a-zA-Z0-9]/g, "")
-    .toUpperCase()
-    .replace(/(.{4})(?=.)/g, "$1-")
+const MAX_BATCH_REDEEM_CODES = 20
+
+function normalizeCdk(value: string): string {
+  return value.replace(/[^a-zA-Z0-9]/g, "").toUpperCase()
+}
+
+function parseCdkList(value: string): string[] {
+  const seen = new Set<string>()
+  const codes: string[] = []
+  for (const part of value.split(/[\s,，;；]+/)) {
+    const code = normalizeCdk(part)
+    if (!code || seen.has(code)) continue
+    seen.add(code)
+    codes.push(code)
+  }
+  return codes
 }
 
 function isValidEmail(value: string): boolean {
@@ -182,10 +193,10 @@ export function RedeemPage() {
     }
   }
 
-  function handleRedeemSuccess(result: RedeemSuccess) {
+  function handleRedeemSuccess(result: RedeemSuccess, reveal = true) {
     const next = [createHistoryEntry(result), ...historyRef.current].slice(0, REDEEM_HISTORY_LIMIT)
     commitHistory(next)
-    setSelectedResult(result)
+    if (reveal) setSelectedResult(result)
   }
 
   function handleDeleteHistory(id: string) {
@@ -290,16 +301,19 @@ export function RedeemPage() {
 }
 
 /** 兑换 CDK 子模块 */
-function RedeemTab({ onSuccess }: { onSuccess: (result: RedeemSuccess) => void }) {
+function RedeemTab({ onSuccess }: { onSuccess: (result: RedeemSuccess, reveal?: boolean) => void }) {
   const [userId, setUserId] = useState("")
-  const [code, setCode] = useState("")
+  const [codeInput, setCodeInput] = useState("")
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [batchResults, setBatchResults] = useState<RedeemBatchItem[]>([])
+
+  const codes = parseCdkList(codeInput)
 
   async function handlePaste() {
     try {
       const text = await navigator.clipboard.readText()
-      if (text) setCode(formatCdk(text))
+      if (text) setCodeInput(text)
     } catch {
       setError("无法读取剪贴板，请手动粘贴")
     }
@@ -308,7 +322,7 @@ function RedeemTab({ onSuccess }: { onSuccess: (result: RedeemSuccess) => void }
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     const uid = userId.trim()
-    const raw = code.replace(/[^a-zA-Z0-9]/g, "")
+    const redeemCodes = parseCdkList(codeInput)
     if (!uid) {
       setError("请输入邮箱")
       return
@@ -317,16 +331,36 @@ function RedeemTab({ onSuccess }: { onSuccess: (result: RedeemSuccess) => void }
       setError("邮箱格式不正确，请检查后重试")
       return
     }
-    if (!raw) {
+    if (redeemCodes.length === 0) {
       setError("请输入兑换码")
+      return
+    }
+    if (redeemCodes.length > MAX_BATCH_REDEEM_CODES) {
+      setError(`单次最多兑换 ${MAX_BATCH_REDEEM_CODES} 个兑换码`)
       return
     }
     setLoading(true)
     setError(null)
+    setBatchResults([])
     try {
-      const data = await api.redeem(uid, raw)
-      setCode("")
-      onSuccess(data)
+      if (redeemCodes.length === 1) {
+        const data = await api.redeem(uid, redeemCodes[0])
+        setCodeInput("")
+        onSuccess(data)
+      } else {
+        const data = await api.redeemBatch(uid, redeemCodes)
+        setBatchResults(data.results)
+        for (const item of data.results) {
+          if (item.redemption) onSuccess(item.redemption, false)
+        }
+        if (data.failed === 0) {
+          setCodeInput("")
+          toast.success(`${data.succeeded} 个兑换码全部兑换成功`)
+        } else {
+          const failedCodes = data.results.filter((item) => !item.ok).map((item) => item.code)
+          setCodeInput(failedCodes.join("\n"))
+        }
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "网络异常，请检查网络后重试")
     } finally {
@@ -357,7 +391,7 @@ function RedeemTab({ onSuccess }: { onSuccess: (result: RedeemSuccess) => void }
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <Label htmlFor="cdk-code">兑换码</Label>
+            <Label htmlFor="cdk-code">兑换码（支持批量）</Label>
             <Button
               type="button"
               variant="ghost"
@@ -369,19 +403,27 @@ function RedeemTab({ onSuccess }: { onSuccess: (result: RedeemSuccess) => void }
               粘贴
             </Button>
           </div>
-          <Input
+          <Textarea
             id="cdk-code"
-            placeholder="XXXX-XXXX-XXXX"
-            value={code}
-            maxLength={32}
+            placeholder={"每行一个兑换码\nXXXX-XXXX-XXXX\nYYYY-YYYY-YYYY"}
+            value={codeInput}
+            rows={codes.length > 1 ? Math.min(8, Math.max(4, codes.length)) : 3}
+            maxLength={MAX_BATCH_REDEEM_CODES * 140}
             onChange={(e) => {
-              setCode(formatCdk(e.target.value))
+              setCodeInput(e.target.value)
               if (error) setError(null)
+              if (batchResults.length) setBatchResults([])
             }}
-            className="text-center font-mono text-base tracking-[0.2em] uppercase"
+            className="resize-y font-mono text-sm uppercase"
             autoComplete="off"
             spellCheck={false}
           />
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span>每行、空格或逗号分隔，重复兑换码自动去重</span>
+            <span className={codes.length > MAX_BATCH_REDEEM_CODES ? "text-destructive" : ""}>
+              {codes.length}/{MAX_BATCH_REDEEM_CODES}
+            </span>
+          </div>
         </div>
 
         {error ? (
@@ -392,9 +434,40 @@ function RedeemTab({ onSuccess }: { onSuccess: (result: RedeemSuccess) => void }
           </Alert>
         ) : null}
 
+        {batchResults.length > 0 ? (
+          <div className="space-y-2" aria-live="polite">
+            <div className="flex items-center justify-between text-sm font-medium">
+              <span>批量兑换结果</span>
+              <span className="text-xs text-muted-foreground">
+                成功 {batchResults.filter((item) => item.ok).length} · 失败 {batchResults.filter((item) => !item.ok).length}
+              </span>
+            </div>
+            <div className="max-h-64 overflow-y-auto rounded-lg border">
+              {batchResults.map((item) => (
+                <div key={item.code} className="flex items-start gap-2 border-b px-3 py-2.5 last:border-b-0">
+                  {item.ok ? (
+                    <CircleCheck className="mt-0.5 size-4 shrink-0 text-emerald-500" />
+                  ) : (
+                    <CircleMinus className="mt-0.5 size-4 shrink-0 text-destructive" />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="break-all font-mono text-xs font-medium">{item.code}</div>
+                    <div className="mt-0.5 text-xs text-muted-foreground">{item.message}</div>
+                  </div>
+                  {item.redemption ? (
+                    <Button type="button" size="xs" variant="ghost" onClick={() => onSuccess(item.redemption!)}>
+                      查看
+                    </Button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
         <Button type="submit" size="lg" className="w-full" disabled={loading}>
           {loading ? <Loader2 className="size-4 animate-spin" /> : null}
-          {loading ? "兑换中…" : "立即兑换"}
+          {loading ? "兑换中…" : codes.length > 1 ? `批量兑换 ${codes.length} 个` : "立即兑换"}
         </Button>
     </form>
   )

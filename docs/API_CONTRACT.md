@@ -75,6 +75,56 @@
 
 可选请求头：`Idempotency-Key: <uuid>`。同 key 同请求返回原结果；同 key 不同请求返回 409。
 
+### POST /api/redeem/batch
+为同一邮箱批量兑换 CDK。请求最多包含 20 个兑换码；服务端按数组顺序逐条处理，每条使用独立事务，因此普通业务失败不会中断其他兑换码。每个兑换仍受单码使用次数、凭证库存和 Webhook 规则约束。
+
+请求：
+```json
+{
+  "user_id": "user@example.com",
+  "codes": ["AAAA-BBBB-CCCC", "DDDD-EEEE-FFFF"]
+}
+```
+
+响应（请求已完成处理时为 HTTP 200，即使其中部分兑换失败）：
+```json
+{
+  "ok": true,
+  "message": "批量兑换处理完成",
+  "total": 2,
+  "succeeded": 1,
+  "failed": 1,
+  "results": [
+    {
+      "code": "AAAA-BBBB-CCCC",
+      "ok": true,
+      "result": "success",
+      "message": "兑换成功 🎉",
+      "redemption": {
+        "ok": true,
+        "result": "success",
+        "message": "兑换成功 🎉",
+        "batch": "批次名称",
+        "code": "AAAA-BBBB-CCCC",
+        "user_id": "user@example.com",
+        "payload": {},
+        "redeemed_at": "2026-07-18 12:00:00"
+      }
+    },
+    {
+      "code": "DDDD-EEEE-FFFF",
+      "ok": false,
+      "result": "code_used_up",
+      "message": "该兑换码已被使用完"
+    }
+  ]
+}
+```
+
+同一请求中重复的兑换码不会再次执行，对应项返回 `invalid_input`。空数组、超过 20 项、非法 JSON 等请求级错误返回 HTTP 400；超过限流额度返回 HTTP 429。批量请求使用独立的每分钟 60 次兑换额度，并按兑换码数量计入 IP 和邮箱限流，而不是只计为一次。
+
+可选请求头：`Idempotency-Key`。同 key 同请求返回相同的整组结果；同 key 不同请求返回 409。前端应在网络重试时复用原 key，新的批量操作使用新 key。
+
 ### POST /api/convert
 > ⚠️ 服务端转换器已移除，此端点不再存在。浏览器本地完成格式转换。
 
@@ -166,7 +216,7 @@
 - `code_length`: int, 8-20
 - `count`: int, 1-10000
 - `max_uses_per_code`: int, 1-100000
-- `max_redeems_per_user`: int, 1-100000
+- `max_redeems_per_user`: 保留的兼容字段；邮箱仅用于记录，不再据此限制兑换次数
 - `expires_at`: ISO datetime string or null
 - `webhook_url`: 仅允许公网 HTTPS URL 或空字符串
 - `webhook_secret`: string, max 512；为空且 webhook_url 非空时后端生成

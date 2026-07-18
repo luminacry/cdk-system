@@ -121,6 +121,22 @@ export interface RedeemSuccess {
   redeemed_at: string
 }
 
+export interface RedeemBatchItem {
+  code: string
+  ok: boolean
+  result: string
+  message: string
+  redemption?: RedeemSuccess
+}
+
+export interface RedeemBatchResponse {
+  ok: boolean
+  total: number
+  succeeded: number
+  failed: number
+  results: RedeemBatchItem[]
+}
+
 export interface FaqItem {
   id: number
   sort_order: number
