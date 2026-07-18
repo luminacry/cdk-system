@@ -28,7 +28,6 @@ const (
 	MaxUserIDLength         = 256
 	MaxIdempotencyKeyLength = 128
 	MaxPayloadSize          = 64 * 1024
-	MaxBatchCodes           = 20
 )
 
 // ErrIdempotencyConflict is returned when an idempotency key is reused with a different request.
@@ -118,8 +117,8 @@ func (s *Service) BatchRedeem(ctx context.Context, req BatchRedeemRequest) (*Bat
 	if utf8.RuneCountInString(req.UserID) > MaxUserIDLength {
 		return batchFailure("邮箱过长"), nil
 	}
-	if len(req.Codes) == 0 || len(req.Codes) > MaxBatchCodes {
-		return batchFailure(fmt.Sprintf("每次请输入 1-%d 个兑换码", MaxBatchCodes)), nil
+	if len(req.Codes) == 0 {
+		return batchFailure("请至少输入一个兑换码"), nil
 	}
 	if !validIdempotencyKey(req.IdempotencyKey) {
 		return batchFailure("幂等 key 无效或过长"), nil

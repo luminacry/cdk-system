@@ -15,6 +15,7 @@ import { toast } from "sonner"
 
 import { api, ApiError } from "@/lib/api"
 import { copyText } from "@/lib/clipboard"
+import { createRedeemArchive } from "@/lib/redeem-archive"
 import {
   buildSummary,
   createMergedJson,
@@ -65,8 +66,6 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { useSiteSettings } from "@/lib/site-settings-context"
-
-const MAX_BATCH_REDEEM_CODES = 20
 
 function normalizeCdk(value: string): string {
   return value.replace(/[^a-zA-Z0-9]/g, "").toUpperCase()
@@ -307,8 +306,27 @@ function RedeemTab({ onSuccess }: { onSuccess: (result: RedeemSuccess, reveal?: 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [batchResults, setBatchResults] = useState<RedeemBatchItem[]>([])
+  const [archiveLoading, setArchiveLoading] = useState(false)
 
   const codes = parseCdkList(codeInput)
+  const archiveCount = batchResults.filter((item) => item.ok && item.redemption).length
+
+  async function downloadArchive(results: RedeemBatchItem[], automatic = false) {
+    setArchiveLoading(true)
+    try {
+      const archive = await createRedeemArchive(results)
+      downloadBlob(archive.blob, archive.filename)
+      toast.success(
+        automatic
+          ? `${archive.count} 个成功结果已自动打包下载`
+          : `${archive.count} 个成功结果已重新打包下载`,
+      )
+    } catch (err) {
+      toast.warning(err instanceof Error ? err.message : "打包下载失败，请稍后重试")
+    } finally {
+      setArchiveLoading(false)
+    }
+  }
 
   async function handlePaste() {
     try {
@@ -335,10 +353,6 @@ function RedeemTab({ onSuccess }: { onSuccess: (result: RedeemSuccess, reveal?: 
       setError("请输入兑换码")
       return
     }
-    if (redeemCodes.length > MAX_BATCH_REDEEM_CODES) {
-      setError(`单次最多兑换 ${MAX_BATCH_REDEEM_CODES} 个兑换码`)
-      return
-    }
     setLoading(true)
     setError(null)
     setBatchResults([])
@@ -359,6 +373,9 @@ function RedeemTab({ onSuccess }: { onSuccess: (result: RedeemSuccess, reveal?: 
         } else {
           const failedCodes = data.results.filter((item) => !item.ok).map((item) => item.code)
           setCodeInput(failedCodes.join("\n"))
+        }
+        if (data.succeeded > 0) {
+          await downloadArchive(data.results, true)
         }
       }
     } catch (err) {
@@ -408,7 +425,6 @@ function RedeemTab({ onSuccess }: { onSuccess: (result: RedeemSuccess, reveal?: 
             placeholder={"每行一个兑换码\nXXXX-XXXX-XXXX\nYYYY-YYYY-YYYY"}
             value={codeInput}
             rows={codes.length > 1 ? Math.min(8, Math.max(4, codes.length)) : 3}
-            maxLength={MAX_BATCH_REDEEM_CODES * 140}
             onChange={(e) => {
               setCodeInput(e.target.value)
               if (error) setError(null)
@@ -420,9 +436,7 @@ function RedeemTab({ onSuccess }: { onSuccess: (result: RedeemSuccess, reveal?: 
           />
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span>每行、空格或逗号分隔，重复兑换码自动去重</span>
-            <span className={codes.length > MAX_BATCH_REDEEM_CODES ? "text-destructive" : ""}>
-              {codes.length}/{MAX_BATCH_REDEEM_CODES}
-            </span>
+            <span className="shrink-0">共 {codes.length} 个</span>
           </div>
         </div>
 
@@ -436,11 +450,25 @@ function RedeemTab({ onSuccess }: { onSuccess: (result: RedeemSuccess, reveal?: 
 
         {batchResults.length > 0 ? (
           <div className="space-y-2" aria-live="polite">
-            <div className="flex items-center justify-between text-sm font-medium">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-sm font-medium">
               <span>批量兑换结果</span>
-              <span className="text-xs text-muted-foreground">
-                成功 {batchResults.filter((item) => item.ok).length} · 失败 {batchResults.filter((item) => !item.ok).length}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">
+                  成功 {batchResults.filter((item) => item.ok).length} · 失败 {batchResults.filter((item) => !item.ok).length}
+                </span>
+                {archiveCount > 0 ? (
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="outline"
+                    disabled={archiveLoading}
+                    onClick={() => downloadArchive(batchResults)}
+                  >
+                    {archiveLoading ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+                    下载 ZIP
+                  </Button>
+                ) : null}
+              </div>
             </div>
             <div className="max-h-64 overflow-y-auto rounded-lg border">
               {batchResults.map((item) => (
@@ -573,8 +601,7 @@ function serializeJson(data: unknown): string {
   return JSON.stringify(data, null, 2) ?? "null"
 }
 
-function downloadJson(data: unknown, filename: string) {
-  const blob = new Blob([serializeJson(data)], { type: "application/json" })
+function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement("a")
   anchor.href = url
@@ -582,7 +609,11 @@ function downloadJson(data: unknown, filename: string) {
   document.body.appendChild(anchor)
   anchor.click()
   document.body.removeChild(anchor)
-  URL.revokeObjectURL(url)
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+function downloadJson(data: unknown, filename: string) {
+  downloadBlob(new Blob([serializeJson(data)], { type: "application/json" }), filename)
 }
 
 function formatExpiry(value: unknown): string {

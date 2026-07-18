@@ -81,7 +81,6 @@ func TestBatchRedeemRejectsInvalidInputBeforeDatabaseAccess(t *testing.T) {
 	tests := []BatchRedeemRequest{
 		{UserID: "", Codes: []string{"ABCD1234"}},
 		{UserID: "user@example.com"},
-		{UserID: "user@example.com", Codes: make([]string, MaxBatchCodes+1)},
 		{UserID: "user@example.com", Codes: []string{"ABCD1234"}, IdempotencyKey: strings.Repeat("k", MaxIdempotencyKeyLength+1)},
 		{UserID: "user@example.com", Codes: []string{"ABCD1234"}, IdempotencyKey: " key-with-space "},
 	}
@@ -90,5 +89,21 @@ func TestBatchRedeemRejectsInvalidInputBeforeDatabaseAccess(t *testing.T) {
 		if err != nil || resp == nil || resp.OK {
 			t.Fatalf("BatchRedeem(%+v) = %+v, %v; want validation failure", req, resp, err)
 		}
+	}
+}
+
+func TestBatchRedeemDoesNotImposeItemCountLimit(t *testing.T) {
+	service := NewService(nil, nil)
+	codes := make([]string, 1000)
+
+	resp, err := service.BatchRedeem(context.Background(), BatchRedeemRequest{
+		UserID: "user@example.com",
+		Codes:  codes,
+	})
+	if err != nil {
+		t.Fatalf("BatchRedeem() error = %v", err)
+	}
+	if !resp.OK || resp.Total != len(codes) || resp.Failed != len(codes) {
+		t.Fatalf("BatchRedeem() = %+v; want all invalid items processed", resp)
 	}
 }

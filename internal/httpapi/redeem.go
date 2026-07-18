@@ -18,8 +18,6 @@ type RedeemHandler struct {
 	rateLimit *ratelimit.Limiter
 }
 
-const batchRedeemRateLimit = 60
-
 // NewRedeemHandler creates a new RedeemHandler.
 func NewRedeemHandler(service *redeem.Service, rateLimit *ratelimit.Limiter) *RedeemHandler {
 	return &RedeemHandler{service: service, rateLimit: rateLimit}
@@ -108,8 +106,8 @@ func (h *RedeemHandler) BatchRedeem(w http.ResponseWriter, r *http.Request) {
 		RespondError(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	if len(req.Codes) == 0 || len(req.Codes) > redeem.MaxBatchCodes {
-		RespondError(w, http.StatusBadRequest, "每次请输入 1-20 个兑换码")
+	if len(req.Codes) == 0 {
+		RespondError(w, http.StatusBadRequest, "请至少输入一个兑换码")
 		return
 	}
 
@@ -119,11 +117,11 @@ func (h *RedeemHandler) BatchRedeem(w http.ResponseWriter, r *http.Request) {
 	if ip == "" {
 		ip = "unknown"
 	}
-	if !h.allowBatchRedeemN(ctx, "redeem:batch:ip:"+ip, len(req.Codes)) {
+	if !h.allowBatchRedeem(ctx, "redeem:batch:ip:"+ip) {
 		RespondError(w, http.StatusTooManyRequests, "请求过于频繁，请稍后再试")
 		return
 	}
-	if req.UserID != "" && !h.allowBatchRedeemN(ctx, "redeem:batch:user:"+redeem.NormalizeUserKey(req.UserID), len(req.Codes)) {
+	if req.UserID != "" && !h.allowBatchRedeem(ctx, "redeem:batch:user:"+redeem.NormalizeUserKey(req.UserID)) {
 		RespondError(w, http.StatusTooManyRequests, "请求过于频繁，请稍后再试")
 		return
 	}
@@ -156,8 +154,8 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 	return nil
 }
 
-func (h *RedeemHandler) allowBatchRedeemN(ctx context.Context, key string, count int) bool {
-	allowed, err := h.rateLimit.AllowNWithLimit(ctx, key, count, batchRedeemRateLimit)
+func (h *RedeemHandler) allowBatchRedeem(ctx context.Context, key string) bool {
+	allowed, err := h.rateLimit.Allow(ctx, key)
 	if err != nil {
 		observability.Logger(ctx).Error("rate limit check failed", "error", err)
 	}
